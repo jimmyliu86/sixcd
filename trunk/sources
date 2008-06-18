@@ -1,0 +1,15 @@
+# The sources for the XBCD device driver:
+
+TARGETNAME=xbcd
+TARGETPATH=obj
+TARGETTYPE=DRIVER
+DRIVERTYPE=WDM
+TARGETLIBS=	hidclass.lib \
+		usbd.lib
+
+
+SOURCES=XBCD_driver.c \
+	XBCD_control.c \
+	XBCD_usb.c \
+	XBCD.rc \
+	RemoveLock.c
