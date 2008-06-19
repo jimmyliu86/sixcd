@@ -1,6 +1,6 @@
-# The sources for the XBCD device driver:
+# The sources for the SIXCD device driver:
 
-TARGETNAME=sixcd
+TARGETNAME=SIXCD
 TARGETPATH=obj
 TARGETTYPE=DRIVER
 DRIVERTYPE=WDM
@@ -10,6 +10,7 @@ TARGETLIBS=	hidclass.lib \
 
 SOURCES=SIXCD_driver.c \
 	SIXCD_control.c \
+	SIXCD_report.c \
 	SIXCD_usb.c \
 	SIXCD.rc \
 	RemoveLock.c

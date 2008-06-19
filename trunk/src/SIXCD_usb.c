@@ -1,5 +1,5 @@
-/*
-    Copyright 2004 Andrew Jones
+/*	
+    Copyright 2008 Andrew Jones
 
     This file is part of SIXCD.
 
@@ -14,7 +14,7 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with Foobar; if not, write to the Free Software
+    along with SIXCD; if not, write to the Free Software
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
@@ -24,7 +24,7 @@
 
 //Send URB to the lower device object
 NTSTATUS SendAwaitUrb(PDEVICE_OBJECT pFdo, PURB pUrb)
-	{
+{
 	PDEVICE_EXTENSION pDevExt = GET_MINIDRIVER_DEVICE_EXTENSION(pFdo);
 	KEVENT event;
 	PIRP pIrp;
@@ -70,34 +70,36 @@ NTSTATUS SendAwaitUrb(PDEVICE_OBJECT pFdo, PURB pUrb)
 
 #pragma LOCKEDCODE
 
-NTSTATUS StartInterruptUrb(PDEVICE_EXTENSION pDevExt)
-	{
-
+NTSTATUS DeviceRead(PDEVICE_EXTENSION pDevExt)
+{
 	NTSTATUS status;
 	PIRP Irp;
 	PURB urb;
 	PIO_STACK_LOCATION stack;
-	BOOLEAN bStartIrp;
 	KIRQL oldirql;
 
-	KeAcquireSpinLock(&pDevExt->polllock, &oldirql);
+	KeAcquireSpinLock(&pDevExt->ReadLock, &oldirql);
 
-	// If the IRP is currently running, don't try to start it again.
-	if (pDevExt->pollpending)
-		bStartIrp = FALSE;
+	// If a read is already pending.  Don't start another one.
+	if (pDevExt->bReadPending)
+	{
+		KdPrint(("DeviceWrite - Read already pending"));
+		KeReleaseSpinLock(&pDevExt->ReadLock, oldirql);
+		return STATUS_DEVICE_BUSY;
+	}
 	else
-		bStartIrp = TRUE, pDevExt->pollpending = TRUE;
+	{
+		pDevExt->bReadPending = TRUE;
+	}
 
-	KeReleaseSpinLock(&pDevExt->polllock, oldirql);
+	KeReleaseSpinLock(&pDevExt->ReadLock, oldirql);
 
-	if (!bStartIrp)
-		return STATUS_DEVICE_BUSY;	// already pending
-
-	Irp = pDevExt->pIrp;
-	urb = pDevExt->pUrb;
+	Irp = pDevExt->ReadInfo.pIrp;
+	urb = pDevExt->ReadInfo.pUrb;
 	if(!(Irp && urb))
 	{
-		KdPrint(("StartInterruptUrb - Could not get Irp and urb from Device Extension"));
+		KdPrint(("DeviceRead - Could not get Irp and urb from Device Extension"));
+		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
 	// Acquire the remove lock so we can't remove the lower device while the IRP
@@ -106,17 +108,17 @@ NTSTATUS StartInterruptUrb(PDEVICE_EXTENSION pDevExt)
 
 	if (!NT_SUCCESS(status))
 	{
-		KdPrint(("StartInterruptUrb - Acquiring remove lock failed"));
-		pDevExt->pollpending = FALSE;
+		KdPrint(("DeviceRead - Acquiring remove lock failed"));
+		pDevExt->bReadPending = FALSE;
 		return status;
 	}
 
-	KdPrint(("StartInterruptUrb - Building urb"));
+	KdPrint(("DeviceRead - Building urb"));
 	UsbBuildInterruptOrBulkTransferRequest(urb, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER),
-		pDevExt->hintpipe, &pDevExt->intdata, NULL, 20, USBD_TRANSFER_DIRECTION_IN | USBD_SHORT_TRANSFER_OK, NULL);
+		pDevExt->hInPipe, &pDevExt->hwInData, NULL, 20, USBD_TRANSFER_DIRECTION_IN | USBD_SHORT_TRANSFER_OK, NULL);
 
-	// Install "OnInterrupt" as the completion routine for the IRP.
-	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE) OnInterrupt, pDevExt, TRUE, TRUE, TRUE);
+	// Install "ReadCompletion" as the completion routine for the IRP.
+	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE) ReadCompletion, pDevExt, TRUE, TRUE, TRUE);
 
 	// Initialize the IRP for an internal control request
 	stack = IoGetNextIrpStackLocation(Irp);
@@ -128,86 +130,194 @@ NTSTATUS StartInterruptUrb(PDEVICE_EXTENSION pDevExt)
 	// and we need to reuse it.  IoReuseIrp is not available in Windows 9x.
 	Irp->Cancel = FALSE;
 
-	KdPrint(("StartInterruptUrb - Returning"));
-	return IoCallDriver(pDevExt->pLowerPdo, Irp);
+	KdPrint(("DeviceRead - Returning"));
+	status = IoCallDriver(pDevExt->pLowerPdo, Irp);
+	if(!NT_SUCCESS(status))
+	{
+		KdPrint(("DeviceRead - IoCallDriver status, %X", status));
+	}
+	return status;
 }
 
-NTSTATUS SendInterruptUrb(PDEVICE_EXTENSION pDevExt)
+#pragma LOCKEDCODE
+
+NTSTATUS ReadCompletion(PDEVICE_OBJECT junk, PIRP pIrp, PVOID Context)
+{
+	PDEVICE_EXTENSION pDevExt = (PDEVICE_EXTENSION)Context;
+	KIRQL oldirql;
+	NTSTATUS Status;
+
+	KeAcquireSpinLock(&pDevExt->ReadLock, &oldirql);
+
+	if (NT_SUCCESS(pIrp->IoStatus.Status))
 	{
-
-	NTSTATUS status;
-	PIRP pIrp;
-	IO_STATUS_BLOCK iostatus;
-	PIO_STACK_LOCATION stack;
-	KEVENT event;
-	PURB urb = (PURB)ExAllocatePool(NonPagedPool, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER));
-
-
-	KdPrint(("SendInterruptUrb - Building urb"));
-	UsbBuildInterruptOrBulkTransferRequest(urb, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER),
-		pDevExt->hintoutpipe, &pDevExt->intoutdata, NULL, 6, USBD_TRANSFER_DIRECTION_OUT | USBD_SHORT_TRANSFER_OK, NULL);
-
-	//status = SendAwaitUrb(pDevExt->pPdo, urb);
-
-	KeInitializeEvent(&event, NotificationEvent, FALSE);
-
-	pIrp = IoBuildDeviceIoControlRequest(IOCTL_INTERNAL_USB_SUBMIT_URB,
-		pDevExt->pLowerPdo, NULL, 0, NULL, 0, TRUE, &event, &iostatus);
-
-	if (!pIrp)
-		{
-			KdPrint(("SendInterruptUrb - Unable to allocate IRP for sending URB"));
-			return STATUS_INSUFFICIENT_RESOURCES;
-		}
-
-	stack = IoGetNextIrpStackLocation(pIrp);
-	stack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
-	stack->Parameters.Others.Argument1 = urb;
-	status = IoCallDriver(pDevExt->pLowerPdo, pIrp);
-	if (status == STATUS_PENDING)
-		{
-			KdPrint(("SendAwaitUrb - status_pending"));
-			KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-			status = iostatus.Status;
-		}
-	if(NT_SUCCESS(status))
-	{
-		KdPrint(("SendInterruptUrb - status success"));
+		KdPrint(("ReadCompletion - Success reading report"));
 	}
 	else
 	{
-		KdPrint(("SendInterruptUrb - error %d", status));
+		KdPrint(("ReadCompletion - Failed to read report"));
+
+		pDevExt->timerEnabled = FALSE;
+		KeCancelTimer(&pDevExt->timer);
 	}
-	KdPrint(("SendInterruptUrb - returning"));
+
+	pDevExt->bReadPending = FALSE;	// allow another read to be started
+	KeReleaseSpinLock(&pDevExt->ReadLock, oldirql);
+
+	KdPrint(("ReadCompletion - Releasing Removelock"));
+	ReleaseRemoveLock(&pDevExt->RemoveLock, pDevExt->ReadInfo.pIrp);
+
+	if(pDevExt->timerEnabled)
+		Status = DeviceRead(pDevExt);
+	
+	KdPrint(("ReadCompletion - Returning"));
+	return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+#pragma LOCKEDCODE
+
+NTSTATUS DeviceWrite(PDEVICE_EXTENSION pDevExt/*, PIRP pIrp*/)
+{
+	NTSTATUS status;
+	PIRP Irp;
+	PURB Urb;
+	PIO_STACK_LOCATION stack;
+	KIRQL oldirql;
+
+	KeAcquireSpinLock(&pDevExt->WriteLock, &oldirql);
+
+	// If a write is already pending.  Don't start another one.
+	if (pDevExt->bWritePending)
+	{
+		KdPrint(("DeviceWrite - Write already pending"));
+		KeReleaseSpinLock(&pDevExt->WriteLock, oldirql);
+		return STATUS_DEVICE_BUSY;
+	}
+	else
+	{
+		pDevExt->bWritePending = TRUE;
+	}
+
+	KeReleaseSpinLock(&pDevExt->WriteLock, oldirql);
+
+	Irp = pDevExt->WriteInfo.pIrp;
+	Urb = pDevExt->WriteInfo.pUrb;
+	if(!(Irp && Urb))
+	{
+		KdPrint(("DeviceRead - Could not get Irp and urb from Device Extension"));
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	// Acquire the remove lock so we can't remove the lower device while the IRP
+	// is still active.
+	status = AcquireRemoveLock(&pDevExt->RemoveLock, Irp);
+
+	if (!NT_SUCCESS(status))
+	{
+		KdPrint(("DeviceWrite - Acquiring remove lock failed"));
+		pDevExt->bWritePending = FALSE;
+		return status;
+	}
+
+	KdPrint(("DeviceWrite - Building urb"));
+	UsbBuildInterruptOrBulkTransferRequest(Urb, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER),
+		pDevExt->hOutPipe, &pDevExt->hwOutData, NULL, 6, USBD_TRANSFER_DIRECTION_OUT | USBD_SHORT_TRANSFER_OK, NULL);
+
+	IoSetCompletionRoutine(Irp, (PIO_COMPLETION_ROUTINE) WriteCompletion, pDevExt, TRUE, TRUE, TRUE);
+
+	stack = IoGetNextIrpStackLocation(Irp);
+	stack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+	stack->Parameters.DeviceIoControl.IoControlCode = IOCTL_INTERNAL_USB_SUBMIT_URB;
+	stack->Parameters.Others.Argument1 = Urb;
+
+	// Set the IRP Cancel flag to false.  It could have been canceled previously
+	// and we need to reuse it.  IoReuseIrp is not available in Windows 9x.
+	Irp->Cancel = FALSE;
+
+	status = IoCallDriver(pDevExt->pLowerPdo, Irp);
+
+	KdPrint(("DeviceWrite - returning"));
+
+	if(status == STATUS_PENDING)
+		status = STATUS_SUCCESS;
+
+	if(!NT_SUCCESS(status))
+	{
+		KdPrint(("DeviceWrite - IoCallDriver status, %X", status));
+	}
 
 	return status;
+}
+
+#pragma LOCKEDCODE
+
+NTSTATUS WriteCompletion(PDEVICE_OBJECT junk, PIRP pIrp, PVOID Context)
+{
+	PDEVICE_EXTENSION pDevExt = (PDEVICE_EXTENSION)Context;
+	KIRQL oldirql;
+	NTSTATUS Status;
+
+	KeAcquireSpinLock(&pDevExt->WriteLock, &oldirql);
+
+	if (NT_SUCCESS(pIrp->IoStatus.Status))
+	{
+		KdPrint(("WriteCompletion - Success writing report"));
+	}
+	else
+	{
+		KdPrint(("WriteCompletion - Failed to write report"));
+	}
+
+	pDevExt->bWritePending = FALSE;	// allow another write to be started
+
+	KeReleaseSpinLock(&pDevExt->WriteLock, oldirql);
+
+	KdPrint(("WriteCompletion - Releasing Removelock"));
+	ReleaseRemoveLock(&pDevExt->RemoveLock, pDevExt->WriteInfo.pIrp);
+	
+	KdPrint(("WriteCompletion - Returning"));
+	return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
 #pragma PAGEDCODE
 //Create an Interrupt Urb
 NTSTATUS CreateInterruptUrb(PDEVICE_OBJECT pFdo)
-	{
+{
 	PDEVICE_EXTENSION pDevExt = GET_MINIDRIVER_DEVICE_EXTENSION(pFdo);
-	PIRP pIrp;
-	PURB pUrb;
-
-	pIrp = IoAllocateIrp(pDevExt->pLowerPdo->StackSize, FALSE);
-	if (!pIrp)
-		{
-		KdPrint(("CreateInterruptUrb - Unable to create IRP for interrupt polling"));
+	
+	pDevExt->ReadInfo.pIrp = IoAllocateIrp(pDevExt->pLowerPdo->StackSize, FALSE);
+	if (!pDevExt->ReadInfo.pIrp)
+	{
+		KdPrint(("CreateInterruptUrb - Unable to create IRP for reading"));
 		return STATUS_INSUFFICIENT_RESOURCES;
-		}
+	}
 
-	pUrb = (PURB) ExAllocatePool(NonPagedPool, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER));
-	if (!pUrb)
-		{
-		KdPrint(("CreateInterruptUrb - Unable to allocate interrupt polling URB"));
-		IoFreeIrp(pIrp);
+	pDevExt->ReadInfo.pUrb = (PURB) ExAllocatePool(NonPagedPool, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER));
+	if (!pDevExt->ReadInfo.pUrb)
+	{
+		KdPrint(("CreateInterruptUrb - Unable to allocate URB for reading"));
+		IoFreeIrp(pDevExt->ReadInfo.pIrp);
 		return STATUS_INSUFFICIENT_RESOURCES;
-		}
+	}
 
-	pDevExt->pIrp = pIrp;
-	pDevExt->pUrb = pUrb;
+	pDevExt->WriteInfo.pIrp = IoAllocateIrp(pDevExt->pLowerPdo->StackSize, FALSE);
+	if (!pDevExt->WriteInfo.pIrp)
+	{
+		KdPrint(("CreateInterruptUrb - Unable to create IRP for writing"));
+		ExFreePool(pDevExt->ReadInfo.pUrb);
+		IoFreeIrp(pDevExt->ReadInfo.pIrp);
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	pDevExt->WriteInfo.pUrb = (PURB) ExAllocatePool(NonPagedPool, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER));
+	if (!pDevExt->WriteInfo.pUrb)
+	{
+		KdPrint(("CreateInterruptUrb - Unable to allocate URB for writing"));
+		IoFreeIrp(pDevExt->WriteInfo.pIrp);
+		ExFreePool(pDevExt->ReadInfo.pUrb);
+		IoFreeIrp(pDevExt->ReadInfo.pIrp);
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
 
 	return STATUS_SUCCESS;
 }
@@ -218,63 +328,55 @@ VOID DeleteInterruptUrb(PDEVICE_OBJECT pFdo)
 {
 	PDEVICE_EXTENSION pDevExt = GET_MINIDRIVER_DEVICE_EXTENSION(pFdo);
 
-	//ASSERT(pDevExt->pIrp != NULL);
-	//ASSERT(pDevExt->pUrb != NULL);
-
-	ExFreePool(pDevExt->pUrb);
-	IoFreeIrp(pDevExt->pIrp);
-	pDevExt->pIrp = NULL;
-	pDevExt->pUrb = NULL;
-}
-
-#pragma LOCKEDCODE
-
-NTSTATUS OnInterrupt(PDEVICE_OBJECT junk, PIRP pIrp, PDEVICE_EXTENSION pDevExt)
+	if(pDevExt->ReadInfo.pUrb)
 	{
-	KIRQL oldirql;
-	NTSTATUS Status;
-
-	KeAcquireSpinLock(&pDevExt->polllock, &oldirql);
-
-	if (NT_SUCCESS(pIrp->IoStatus.Status))
-	{
-		//Status = SIXCDReadData(pDevExt, pDevExt->CurrentIrp);
-
-		KdPrint(("OnInterrupt - Success reading report"));
+		ExFreePool(pDevExt->ReadInfo.pUrb);
+		pDevExt->ReadInfo.pUrb = NULL;
 	}
-	else
+	
+	if(pDevExt->ReadInfo.pIrp)
 	{
-		KdPrint(("OnInterrupt - Failed to read report"));
+		IoFreeIrp(pDevExt->ReadInfo.pIrp);
+		pDevExt->ReadInfo.pIrp = NULL;
 	}
 
-	pDevExt->pollpending = FALSE;	// allow another poll to be started
-	KeReleaseSpinLock(&pDevExt->polllock, oldirql);
-
-	KdPrint(("OnInterrupt - Releasing Removelock"));
-	ReleaseRemoveLock(&pDevExt->RemoveLock, pDevExt->pIrp); // balances acquisition in StartInterruptUrb
-
-	if(pDevExt->timerEnabled)
-		Status = StartInterruptUrb(pDevExt);
-
-	KdPrint(("OnInterrupt - Returning"));
-	return STATUS_MORE_PROCESSING_REQUIRED;
+	if(pDevExt->WriteInfo.pUrb)
+	{
+		ExFreePool(pDevExt->WriteInfo.pUrb);
+		pDevExt->WriteInfo.pUrb = NULL;
+	}
+	
+	if(pDevExt->WriteInfo.pIrp)
+	{
+		IoFreeIrp(pDevExt->WriteInfo.pIrp);
+		pDevExt->WriteInfo.pIrp = NULL;
+	}
 }
 
 #pragma LOCKEDCODE
 
 VOID StopInterruptUrb(PDEVICE_EXTENSION pDevExt)
 {
+	pDevExt->timerEnabled = FALSE;
+	KeCancelTimer(&pDevExt->timer);
+
 	KdPrint(("StopInterruptUrb - Entered"));
-	if (pDevExt->pollpending)
+	if (pDevExt->bReadPending)
 	{
-		KdPrint(("StopInterruptUrb - Canceling pIrp"));
-		IoCancelIrp(pDevExt->pIrp);
+		KdPrint(("StopInterruptUrb - Canceling read Irp"));
+		IoCancelIrp(pDevExt->ReadInfo.pIrp);
+	}
+
+	if (pDevExt->bWritePending)
+	{
+		KdPrint(("StopInterruptUrb - Canceling write Irp"));
+		IoCancelIrp(pDevExt->WriteInfo.pIrp);
 	}
 	return;
 }
 
 /*++
-
+ 
 Routine Description:
 
     This routine synchronously submits a URB_FUNCTION_RESET_PIPE
@@ -306,7 +408,7 @@ Return Value:
     deviceExtension = (PDEVICE_EXTENSION) DeviceObject->DeviceExtension;
 
 
-    urb = ExAllocatePool(NonPagedPool,
+    urb = ExAllocatePool(NonPagedPool, 
                          sizeof(struct _URB_PIPE_REQUEST));
 
     if(urb) {
@@ -325,7 +427,7 @@ Return Value:
     }
 
     if(NT_SUCCESS(ntStatus)) {
-
+    
         KdPrint(("ResetPipe - success\n"));
         ntStatus = STATUS_SUCCESS;
     }

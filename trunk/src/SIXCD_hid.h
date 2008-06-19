@@ -1,5 +1,5 @@
-/*
-    Copyright 2004 Andrew Jones
+/*	
+    Copyright 2008 Andrew Jones
 
     This file is part of SIXCD.
 
@@ -14,11 +14,14 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with Foobar; if not, write to the Free Software
+    along with SIXCD; if not, write to the Free Software
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #include "hidclass.h"
+
+#define HID_USAGE_JOYSTICK 0x04
+#define HID_USAGE_GAMEPAD 0x05
 
 typedef struct _HID_DEVICE_EXTENSION {
 

@@ -1,5 +1,5 @@
-/*
-    Copyright 2004 Andrew Jones
+/*	
+    Copyright 2008 Andrew Jones
 
     This file is part of SIXCD.
 
@@ -14,167 +14,320 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with Foobar; if not, write to the Free Software
+    along with SIXCD; if not, write to the Free Software
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #include "SIXCD_driver.h"
-#include "SIXCD_report.h"
 
+ULONG _fltused = 0;
+
+/*****************************************************************************/
+
+/*! This pragma keeps code in physical memory */
 #pragma LOCKEDCODE
-
 NTSTATUS SIXCDDispatchIntDevice(IN PDEVICE_OBJECT pFdo, IN PIRP pIrp)
 {
+//	unsigned int iTemp;
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(pIrp);
     NTSTATUS Status = STATUS_SUCCESS;
     PDEVICE_EXTENSION pDevExt = GET_MINIDRIVER_DEVICE_EXTENSION(pFdo);
 
-		switch (stack->Parameters.DeviceIoControl.IoControlCode)
+		switch(stack->Parameters.DeviceIoControl.IoControlCode)
 		{
 		case IOCTL_HID_GET_DEVICE_ATTRIBUTES:
 			{
 				PHID_DEVICE_ATTRIBUTES pHidAttributes;
 				pHidAttributes = (PHID_DEVICE_ATTRIBUTES) pIrp->UserBuffer;
-
+				
 				KdPrint(("SIXCDDispatchIntDevice - sending device attributes"));
 				if (stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(HID_DEVICE_ATTRIBUTES))
 				{
 					Status = STATUS_BUFFER_TOO_SMALL;
 					KdPrint(("Buffer for Device Attributes is too small"));
+					break;
 				}
-				else
-				{
-					RtlZeroMemory(pHidAttributes, sizeof(HID_DEVICE_ATTRIBUTES));
+				
+				RtlZeroMemory(pHidAttributes, sizeof(HID_DEVICE_ATTRIBUTES));
+					
+				pHidAttributes->Size = sizeof(HID_DEVICE_ATTRIBUTES);
 
-					pHidAttributes->Size = sizeof(HID_DEVICE_ATTRIBUTES);
+				/*!
+				These have to match with what's installed into the
+				registry from the .INF file
+				Should this really be hardwired? What about getting it
+				from a config file or the registry (since it's in there
+				somewhere anyhow...)
+				*/
 
-//TODO: Replace this with something that reports VendorID & ProductID correctly
-//					pHidAttributes->VendorID = 0x0738;//pDevExt->dd.idVendor;
-//					pHidAttributes->ProductID = 0x4516;//pDevExt->dd.idProduct;
-//Temporary Fix: Report the PS3 vendor/product ID
-					pHidAttributes->VendorID = 0x054C;//pDevExt->dd.idVendor;
-					pHidAttributes->ProductID = 0x0268;//pDevExt->dd.idProduct;
-					pHidAttributes->VersionNumber = 0x0001;//pDevExt->dd.bcdDevice;
+				/*
+				Vendor and Product ID's are fixed to make it easier to
+				write the .INF file.
+				*/
+				pHidAttributes->VendorID = 0x0738;//pDevExt->dd.idVendor;
+				pHidAttributes->ProductID = 0x4516;//pDevExt->dd.idProduct;
 
-					pIrp->IoStatus.Information = sizeof(HID_DEVICE_ATTRIBUTES);
+				pHidAttributes->VersionNumber=0x0001;//pDevExt->dd.bcdDevice;
+				
+				pIrp->IoStatus.Information = sizeof(HID_DEVICE_ATTRIBUTES);
+				
+				KdPrint(("SIXCDDispatchIntDevice - Sent Device Attributes"));
 
-					KdPrint(("SIXCDDispatchIntDevice - Sent Device Attributes"));
-				}
 				break;
 			}
+
 		case IOCTL_HID_GET_DEVICE_DESCRIPTOR:
 			{
 				PHID_DESCRIPTOR pHidDescriptor;
+				USHORT RepDescSize;
 				pHidDescriptor = (PHID_DESCRIPTOR) pIrp->UserBuffer;
-
+				
 				KdPrint(("SIXCDDispatchIntDevice - sending device descriptor"));
 				if (stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(HID_DESCRIPTOR))
 				{
 					Status = STATUS_BUFFER_TOO_SMALL;
 					KdPrint(("Buffer for Device Descriptor is too small"));
+					break;
 				}
-				else
-				{
-					RtlZeroMemory(pHidDescriptor, sizeof(HID_DESCRIPTOR));
+				
+				RtlZeroMemory(pHidDescriptor, sizeof(HID_DESCRIPTOR));
+				
+				pHidDescriptor->bLength = sizeof(HID_DESCRIPTOR);
+				pHidDescriptor->bDescriptorType = HID_HID_DESCRIPTOR_TYPE;
+				pHidDescriptor->bcdHID = HID_REVISION;
+				pHidDescriptor->bCountry = 0;
+				pHidDescriptor->bNumDescriptors = 1;
+				pHidDescriptor->DescriptorList[0].bReportType = HID_REPORT_DESCRIPTOR_TYPE;
+				RepDescSize = GetRepDesc(pDevExt, NULL);
+				pHidDescriptor->DescriptorList[0].wReportLength = RepDescSize;
+				
+				pIrp->IoStatus.Information = sizeof(HID_DESCRIPTOR);
+				KdPrint(("SIXCDDispatchIntDevice - Sent Device Descriptor"));
 
-					pHidDescriptor->bLength = sizeof(HID_DESCRIPTOR);
-					pHidDescriptor->bDescriptorType = HID_HID_DESCRIPTOR_TYPE;
-					pHidDescriptor->bcdHID = HID_REVISION;
-					pHidDescriptor->bCountry = 0;
-					pHidDescriptor->bNumDescriptors = 1;
-					pHidDescriptor->DescriptorList[0].bReportType = HID_REPORT_DESCRIPTOR_TYPE;
-					pHidDescriptor->DescriptorList[0].wReportLength = sizeof(ReportDescriptor);
-
-					pIrp->IoStatus.Information = sizeof(HID_DESCRIPTOR);
-					KdPrint(("SIXCDDispatchIntDevice - Sent Device Descriptor"));
-				}
 				break;
 			}
+
 		case IOCTL_HID_GET_REPORT_DESCRIPTOR:
 			{
+				int iSize;
+				PUCHAR pBuffer = (PUCHAR)pIrp->UserBuffer;
+
 				KdPrint(("SIXCDDispatchIntDevice - sending report descriptor"));
-				if (stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(ReportDescriptor))
+
+				iSize = GetRepDesc(pDevExt, NULL);
+
+				if(stack->Parameters.DeviceIoControl.OutputBufferLength < (unsigned int) iSize)
 				{
 					Status = STATUS_BUFFER_TOO_SMALL;
 					KdPrint(("Buffer for Report Descriptor is too small"));
+					break;
 				}
-				else
-				{
-					RtlCopyMemory(pIrp->UserBuffer, ReportDescriptor, sizeof(ReportDescriptor));
+				
+				iSize = GetRepDesc(pDevExt, pBuffer);
+				
+				pIrp->IoStatus.Information = iSize;
+				
+				KdPrint(("SIXCDDispatchIntDevice - Sent Report Descriptor"));
 
-					pIrp->IoStatus.Information = sizeof(ReportDescriptor);
-
-					KdPrint(("SIXCDDispatchIntDevice - Sent Report Descriptor"));
-				}
 				break;
 			}
+
+		/*!
+		Apparently this branch will be executed whenever some application
+		tries to get data from the gamepad driver.
+		*/
 		case IOCTL_HID_READ_REPORT:
-			{
-				KIRQL oldirql;
+			{	
 				LARGE_INTEGER timeout;
 
 				KdPrint(("SIXCDDispatchIntDevice - IOCTL_HID_READ_REPORT entry"));
 
-				Status = SIXCDReadData(pDevExt, pIrp);
+				if(stack->Parameters.DeviceIoControl.OutputBufferLength < OUT_BUFFER_LEN)
+				{
+					KdPrint(("IOCTL_HID_READ_REPORT - Buffer is too small"));
+					Status = STATUS_BUFFER_TOO_SMALL;
+					break;
+				}
+
+				Status=SIXCDReadData(pFdo, pIrp);
 
 				//Set a timer to keep reading data for another 5 seconds
 				//Fixes problems with button configuration in games
 				timeout.QuadPart = -50000000;
 				KeSetTimer(&pDevExt->timer, timeout, &pDevExt->timeDPC);
 				pDevExt->timerEnabled = TRUE;
-
-				Status = StartInterruptUrb(pDevExt);
+				
+				Status = DeviceRead(pDevExt);
 
 				KdPrint(("SIXCDDispatchIntDevice - IOCTL_HID_READ_REPORT exit"));
 				return Status;
 			}
+
+		/*!
+		This branch is for writing data to the driver (or the device), e.g
+		when changing button configuration via the config tool or when the
+		rumble actuators are accessed...
+		There have to be some hardwired values here.
+		Quote: "The Xbox gamepad lacks the HID report descriptor that
+		describes the input/output report formats"
+		*/
 		case IOCTL_HID_WRITE_REPORT:
 			{
-				PHID_XFER_PACKET temp = (PHID_XFER_PACKET)pIrp->UserBuffer;
+				PHID_XFER_PACKET pHxp;
 
-				KdPrint(("SIXCDDispatchIntDevice - IOCTL_HID_WRITE_REPORT"));
+				KdPrint(("SIXCDDispatchIntDevice: IOCTL_HID_WRITE_REPORT"));
 
-				if (temp->reportBuffer && temp->reportBufferLen)
+				if(stack->Parameters.DeviceIoControl.InputBufferLength < sizeof(HID_XFER_PACKET))
 				{
-					int iTemp;
-					pDevExt->intoutdata[0] = 0x00;
-					pDevExt->intoutdata[1] = 0x06;
-					pDevExt->intoutdata[2] = 0x00;
-					iTemp = temp->reportBuffer[1];
-					KdPrint(("iTemp = %d", iTemp));
-					iTemp = iTemp * pDevExt->LAFactor/100;
-					KdPrint(("iTemp = %d", iTemp));
-					pDevExt->intoutdata[3] = iTemp;
-					pDevExt->intoutdata[4] = 0x00;
-					iTemp = temp->reportBuffer[2];
-					KdPrint(("iTemp = %d", iTemp));
-					iTemp = iTemp * pDevExt->RAFactor/100;
-					KdPrint(("iTemp = %d", iTemp));
-					pDevExt->intoutdata[5] = iTemp;
-
-					Status = SendInterruptUrb(pDevExt);
-
-					if(temp->reportBuffer[0] == 1)
-					{
-						SIXCDReadButtonConfig(pFdo);
-					}
+					KdPrint(("IOCTL_HID_WRITE_REPORT - Buffer is too small"));
+					Status = STATUS_BUFFER_TOO_SMALL;
+					break;
 				}
+
+				pHxp = (PHID_XFER_PACKET)pIrp->UserBuffer;
+
+				if(pHxp->reportBufferLen != 3)
+				{
+					KdPrint(("IOCTL_HID_WRITE_REPORT - pHxp->reportBuffer has wrong size"));
+					Status = STATUS_BUFFER_TOO_SMALL;
+					break;
+				}
+
+				/* Hardwired values, 06=length of report */
+				pDevExt->hwOutData[0]=0x00;
+				pDevExt->hwOutData[1]=0x06;
+				pDevExt->hwOutData[2]=0x00;
+				pDevExt->hwOutData[4]=0x00;
+
+				/*
+				Rumble actuators.
+				Output values are 0-255. For simplicity, the scale factors
+				'LaFactor' and 'RaFactor' also range from 0 to 255.
+				Thus, the final value calculates like this:
+				Out=((ScaleFactor+1)*In)/256
+				*/
+				/* Left */
+				pDevExt->hwOutData[3]=((1+pDevExt->LaFactor)*
+					(unsigned int)(pHxp->reportBuffer[1]))>>8;
+
+				/* Right */
+				pDevExt->hwOutData[5]=((1+pDevExt->RaFactor)*
+					(unsigned int)(pHxp->reportBuffer[2]))>>8;
+
+				if(pDevExt->bHasMotors)
+					Status = DeviceWrite(pDevExt/*, pIrp*/);
 				else
-				{
-					KdPrint(("HIDMINI.SYS: Write report ID 0x%x w/o buffer\n",
-							  (unsigned)temp->reportId ));
-				}
-
-				Status = STATUS_SUCCESS;
-
-				pIrp->IoStatus.Information = 0;
+					Status = STATUS_SUCCESS;
 
 				break;
 			}
+
+		/*
+		This request is received from the setup utility when the driver told to
+		read a new configuration from the registry.  The buffer received must
+		contain the signature for SIXCD("XBSU") so the request can go through.
+		*/
+		case IOCTL_HID_SET_FEATURE:
+			{
+				PHID_XFER_PACKET pHxp;
+
+				KdPrint(("SIXCDDispatchIntDevice: IOCTL_HID_SET_FEATURE"));
+
+				pHxp = (PHID_XFER_PACKET)pIrp->UserBuffer;
+
+				switch(pHxp->reportId)
+				{
+					case FEATURE_CODE_SET_CONFIG:
+						{
+							PFEATURE_SET_CONFIG pFsc;
+
+							if(pHxp->reportBufferLen != sizeof(FEATURE_SET_CONFIG))
+							{
+								KdPrint(("IOCTL_HID_SET_FEATURE - pHxp->reportBuffer is the wrong size"));
+								Status = STATUS_INVALID_PARAMETER;
+								break;
+							}
+
+							pFsc = (PFEATURE_SET_CONFIG)pHxp->reportBuffer;
+
+							if(pFsc->Signature != SIXCD_SIGNATURE)
+							{
+								KdPrint(("IOCTL_HID_SET_FEATURE - Unknown signature"));
+								Status = STATUS_NOT_SUPPORTED;
+								break;
+							}
+
+							SIXCDReadConfig(pFdo);
+							break;
+						}
+					default:
+						{
+							KdPrint(("IOCTL_HID_SET_FEATURE - Wrong report ID"));
+							Status = STATUS_NOT_SUPPORTED;
+							break;
+						}
+				}
+
+				break;
+			}
+
+		case IOCTL_HID_GET_FEATURE:
+			{
+				PHID_XFER_PACKET pHxp;
+
+				KdPrint(("SIXCDDispatchIntDevice: IOCTL_HID_GET_FEATURE"));
+
+				if(stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(HID_XFER_PACKET))
+				{
+					KdPrint(("IOCTL_HID_GET_FEATURE - Buffer is too small"));
+					Status = STATUS_BUFFER_TOO_SMALL;
+					break;
+				}
+
+				pHxp = (PHID_XFER_PACKET)pIrp->UserBuffer;
+
+				switch(pHxp->reportId)
+				{
+					case FEATURE_CODE_GET_VERSION:
+						{
+							PFEATURE_GET_VERSION pFgv;
+
+							if(pHxp->reportBufferLen != sizeof(FEATURE_GET_VERSION))
+							{
+								KdPrint(("IOCTL_HID_GET_FEATURE - pHxp->reportBuffer is the wrong size"));
+								Status = STATUS_INVALID_PARAMETER;
+								break;
+							}
+
+							pFgv = (PFEATURE_GET_VERSION)pHxp->reportBuffer;
+
+							if(pFgv->Signature != SIXCD_SIGNATURE)
+							{
+								KdPrint(("IOCTL_HID_GET_FEATURE - Unknown signature"));
+								Status = STATUS_NOT_SUPPORTED;
+								break;
+							}
+
+							pFgv->Major = VER_MAJOR;
+							pFgv->Minor = VER_MINOR;
+							pFgv->Release = VER_RELEASE;
+
+							pIrp->IoStatus.Information = sizeof(FEATURE_GET_VERSION);
+						}
+					default:
+						{
+							KdPrint(("IOCTL_HID_GET_FEATURE - Wrong report ID"));
+							Status = STATUS_NOT_SUPPORTED;
+						}
+				}
+
+				break;
+			}
+
 		default:
 			{
-				KdPrint(("SIXCDDispatchIntDevice - Irp not implemented"));
-				Status = STATUS_NOT_SUPPORTED;
+				KdPrint(("SIXCDDispatchIntDevice: Irp not implemented"));
+				Status=STATUS_NOT_SUPPORTED;
 				break;
 			}
 		}
@@ -185,7 +338,7 @@ NTSTATUS SIXCDDispatchIntDevice(IN PDEVICE_OBJECT pFdo, IN PIRP pIrp)
 	{
 		KdPrint(("SIXCDDispatchIntDevice - irp status not pending"));
 		IoCompleteRequest(pIrp, IO_NO_INCREMENT);
-		Status = STATUS_SUCCESS;
+		//Status = STATUS_SUCCESS;
 	}
 	else
 	{
@@ -197,8 +350,8 @@ NTSTATUS SIXCDDispatchIntDevice(IN PDEVICE_OBJECT pFdo, IN PIRP pIrp)
     return Status;
 }
 
+/*! This pragma allows code to go into virtual memory */
 #pragma PAGEDCODE
-
 NTSTATUS SIXCDDispatchDevice(IN PDEVICE_OBJECT pFdo, IN PIRP pIrp)
 {
 	PDEVICE_EXTENSION pDevExt = GET_MINIDRIVER_DEVICE_EXTENSION(pFdo);
@@ -211,7 +364,6 @@ NTSTATUS SIXCDDispatchDevice(IN PDEVICE_OBJECT pFdo, IN PIRP pIrp)
 }
 
 #pragma PAGEDCODE
-
 NTSTATUS SIXCDDispatchSystem(IN PDEVICE_OBJECT pFdo, IN PIRP pIrp)
 {
 	PDEVICE_EXTENSION pDevExt = GET_MINIDRIVER_DEVICE_EXTENSION(pFdo);
@@ -223,11 +375,12 @@ NTSTATUS SIXCDDispatchSystem(IN PDEVICE_OBJECT pFdo, IN PIRP pIrp)
 	return status;
 }
 
-#pragma LOCKEDCODE
+/*****************************************************************************/
 
-double sqrt2(double x)
-{							// sqrt
-	double result;
+#pragma LOCKEDCODE
+float sqrt2(float x)
+{
+	float result;
 
 	_asm
 		{
@@ -239,915 +392,508 @@ double sqrt2(double x)
 	return result;
 }
 
+/*!
+Float to integer conversion. Has to be done 'manually', since the conversion
+via the usual (float) cast operator relies on some library function
+(no such libraries are included here).
+*/
 int ftoi(float f)
 {
-   int rv;
+	int rv;
 	_asm {
 		fld f
 		fistp rv
-		//fwait /* not sure if this is necessary on newer processors... */
+		//fwait  // not sure if this is necessary on newer processors...
 		}
 	return rv ;
 }
 
-void CalcAxes(short *xdatain, short *ydatain, int iDeadZone, PDEVICE_EXTENSION pDevExt)
+/*!
+Apply deadzone. Uses floating point math. Assumes 0.0<=values<=1.0 !
+
+Parameters:
+PLONG lpAxis1   : Pointer to first axis value
+PLONG lpAxis2   : Pointer to second axis value
+LONG DeadZone : Deadzone
+*/
+void applyDeadzone2D(PLONG lpAxis1, PLONG lpAxis2, LONG DeadZone, BOOLEAN bFullAxes)
 {
-	short xdata = *xdatain;
-	short ydata = *ydatain;
-
-	if(!pDevExt->bFPCalc)
-	{
-		//Floating Point disabled
-		//Use simple deadzone calculations
-
-		if(xdata >= 0)
-		{
-			if(xdata < iDeadZone)
-			{
-				xdata = 0;
-			}
-			else
-			{
-				xdata = 32767 * (xdata - iDeadZone)/(32767 - iDeadZone);
-			}
-		}
-		else
-		{
-			if(xdata > -(iDeadZone))
-			{
-				xdata = 0;
-			}
-			else
-			{
-				xdata = -32767 * (xdata + iDeadZone)/(-32768 + iDeadZone);
-			}
-		}
-
-		if(ydata >= 0)
-		{
-			if(ydata < iDeadZone)
-			{
-				ydata = 0;
-			}
-			else
-			{
-				ydata = 32767 * (ydata - iDeadZone)/(32767 - iDeadZone);
-			}
-		}
-		else
-		{
-			if(ydata > -(iDeadZone))
-			{
-				ydata = 0;
-			}
-			else
-			{
-				ydata = -32767 * (ydata + iDeadZone)/(-32768 + iDeadZone);
-			}
-		}
-	}
-	else
-	{
-		//Floating Point enabled
-
-		NTSTATUS Status;
-		KFLOATING_SAVE saveData;
-		double radius;
-		double xdata2;
-		double ydata2;
-
-		Status = KeSaveFloatingPointState(&saveData);
-
-		if(NT_SUCCESS(Status))
-		{
-			radius = (double)(xdata * xdata) + (double)(ydata * ydata);
-			radius = sqrt2(radius);
-			if(radius > 32767)
-				radius = 32767;
-
-			if(radius >= iDeadZone)
-			{
-				radius = 32767 * (radius - iDeadZone)/(32767 - iDeadZone);
-				xdata2 = xdata/(radius * 0.7071);
-				ydata2 = ydata/(radius * 0.7071);
-				if(xdata2 > 1)
-					xdata2 = 1;
-				if(xdata2 < -1)
-					xdata2 = -1;
-				if(ydata2 > 1)
-					ydata2 = 1;
-				if(ydata2 < -1)
-					ydata2 = -1;
-				xdata2 = xdata2 * radius;
-				ydata2 = ydata2 * radius;
-				xdata = ftoi(xdata2);
-				ydata = ftoi(ydata2);
-			}
-			else
-			{
-				xdata = 0;
-				ydata = 0;
-			}
-
-			KeRestoreFloatingPointState(&saveData);
-		}
-	}
-
-	*xdatain = xdata;
-	*ydatain = ydata;
-}
-
-NTSTATUS SIXCDReadData(PDEVICE_EXTENSION pDevExt, PIRP pIrp)
-{
-	unsigned char xbdata[11]; //Holds output data
-	short btndata;
-	short xdata;
-	short ydata;
-	int iTBuffer; //Temporary buffer for analog button data
-	int iTest;
+	//Floating Point enabled
 	NTSTATUS Status;
 
-	RtlZeroMemory(&btndata, sizeof(btndata));
-	RtlZeroMemory(&xbdata, sizeof(xbdata));
-	RtlZeroMemory(&xdata, sizeof(xdata));
-	RtlZeroMemory(&ydata, sizeof(ydata));
+	/*!
+	Apparently before doing own floating point operations a current 'state'
+	has to be saved and restored at the end of the function.
+	(Looks a bit like pushing/pulling registers in asm)
+	*/
+	KFLOATING_SAVE saveData;
 
-	if(pDevExt->btnset)
-	{
+	/*!
+	Quote from the DDK documentation:
+	'The KeSaveFloatingPointState routine saves the nonvolatile floating-point
+	context so the caller can carry out floating-point operations.'
+	*/
+	Status=KeSaveFloatingPointState(&saveData);
 
-		//Button A
-		iTBuffer = pDevExt->intdata[4] & 255; //Pass the value of button A to iTBuffer
-		//If value of button is higher than the threshold value then button is active
-		if (iTBuffer >= pDevExt->BThreshold)
+	if(NT_SUCCESS(Status))
+	{	
+		float VectorLength;
+
+		float fAxis1 = (float)*lpAxis1/(float)MAX_VALUE;
+		float fAxis2 = (float)*lpAxis2/(float)MAX_VALUE;
+		float fDZ = (float)DeadZone/(float)MAX_VALUE;
+
+		/*!
+		This is the simple version. Everything inside the deadzone will be
+		zeroed out. Anything outside will be used 'as is'. This ought to do,
+		since the deadzone is intended to cancel movement 'noise' and small
+		offsets around the center. Other gamepad drivers SEEM to do it like
+		this, too.
+		Still, if movement with this method 'feels' awkward, adding the other
+		solution (below) might be better.
+		*/
+
+		/* Calculate 2D movement vector length */ 
+		VectorLength=sqrt2((fAxis1 * fAxis1)+(fAxis2 * fAxis2));
+
+		/* Cancel out, if smaller than deadzone. */
+		if(VectorLength<fDZ)
 		{
-			btndata |= pDevExt->buttons[0];
+			fAxis1=fAxis2=0.0f;
 		}
-
-		//Button B
-		iTBuffer = pDevExt->intdata[5] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			btndata |= pDevExt->buttons[1];
-		}
-
-		//Button X
-		iTBuffer = pDevExt->intdata[6] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			btndata |= pDevExt->buttons[2];
-		}
-
-		//Button Y
-		iTBuffer = pDevExt->intdata[7] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			btndata |= pDevExt->buttons[3];
-		}
-
-		//Black Button
-		iTBuffer = pDevExt->intdata[8] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			btndata |= pDevExt->buttons[4];
-		}
-
-		//White Button
-		iTBuffer = pDevExt->intdata[9] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			btndata |= pDevExt->buttons[5];
-
-
-		if((pDevExt->intdata[2] & 16) && (pDevExt->intdata[2] & 32) && pDevExt->bTShortcut)
-		{
-			if(!pDevExt->bTShortcutTrigger)
-			{
-				pDevExt->bTShortcutTrigger = TRUE;
-				pDevExt->bTThrottle = !pDevExt->bTThrottle;
-			}
-		}
+		/*!
+		This the technique used in the original SIXCD code (adapted to the
+		numeric range here!). The idea is to zero out any movement smaller than
+		the deadzone radius (OK, normal; done above).
+		Then, any movement beyond the deadzone will be re-scaled to the full
+		range, i.e. subtract deadzone from movement and rescale it to 0.0 - 1.0
+		*/
 		else
 		{
-			pDevExt->bTShortcutTrigger = FALSE;
+			/*
+			Make VectorLength a scale factor for the axes! To avoid numeric
+			problems and divisions by zero (!) DeadZone is limited to 0.95f
+			here (a little dirty, but it should be OK - who uses such a
+			large deadzone anyway).
+			*/
+			if(fDZ>0.95f) fDZ=0.95f;
+			VectorLength-=fDZ;
+			VectorLength/=1.0f-fDZ;
 
-			//Start Button
-			if (pDevExt->intdata[2] & 16)
+			if(bFullAxes)
 			{
-				btndata |= pDevExt->buttons[6];
+				fAxis1*=1.4142136f;
+				fAxis2*=1.4142136f;
 			}
 
-			//Back Button
-			if (pDevExt->intdata[2] & 32)
-			{
-				btndata |= pDevExt->buttons[7];
-			}
+			fAxis1*=VectorLength;
+			fAxis2*=VectorLength;
+
+			/* Ensure the -1.0f - 1.0f range! */
+			if(fAxis1>1.0f) fAxis1=1.0f;
+			if(fAxis1<-1.0f) fAxis1=-1.0f;
+			if(fAxis2>1.0f) fAxis2=1.0f;
+			if(fAxis2<-1.0f) fAxis2=-1.0f;
 		}
 
-		//L-Stick Press
-		if (pDevExt->intdata[2] & 64)
-		{
-			btndata |= pDevExt->buttons[8];
-		}
+		*lpAxis1 = ftoi(fAxis1 * MAX_VALUE);
+		*lpAxis2 = ftoi(fAxis2 * MAX_VALUE);
 
-		//R-Stick Press
-		if (pDevExt->intdata[2] & 128)
-		{
-			btndata |= pDevExt->buttons[9];
-		}
+		KeRestoreFloatingPointState(&saveData);
+	}
+	else
+	{
+		//Do nothing.  Leave data as it is.
+	}
+}
 
-		if(!pDevExt->bTThrottle)
-		{
-			//L-Trigger Button
-			iTBuffer = pDevExt->intdata[10] & 255;
-			if (iTBuffer >= pDevExt->TThreshold)
-			{
-				btndata |= pDevExt->buttons[10];
-			}
+/*****************************************************************************/
 
-			//R-Trigger Button
-			iTBuffer = pDevExt->intdata[11] & 255;
-			if (iTBuffer >= pDevExt->TThreshold)
-			{
-				btndata |= pDevExt->buttons[11];
-			}
+/*! */
+NTSTATUS SIXCDReadData(PDEVICE_OBJECT pFdo, PIRP pIrp)
+{
+	NTSTATUS Status;
+	int index, MapIndex;
+
+	// Quote: '__int16 is synonymous with type short'
+	// (Used as a general purpose 16 Bit variable in this function)
+	__int16 SignedInt16;
+
+	LONG StickX, StickY;
+
+	// Output data (from this driver to the rest of the system)
+	UCHAR OutData[OUT_BUFFER_LEN];
+
+	// A float array for 'precalculated' output axes. These are used to apply
+	// deadzones.
+
+	static LONG PreOutAxes[NR_OUT_AXES];
+
+	// The POV is defined in a (more or less) funny way:
+	// 7 0 1
+	//  \|/
+	// 6-8-2
+	//  /|\
+	// 5 4 3
+	// To map the 4 semiaxes to that, let's use something like a truth table (or
+	// lookup table) with the input index being constructed from the 4 input
+	// semiaxes as bits. This results in a truth table with 16 values, of which
+	// only 9 are valid.
+	// This peculiar approach seemed to be the most flexible and easy to implement
+	// and debug. Thus, it would be easy to replace an 'invalid' position with an
+	// intelligible alternative. For example, if Up/Left/Right are pressed the
+	// result could be Up only (like Left and Right cancel out each other)
+	// instead of an invalid position...
+	static UCHAR OutPovValue[16]=
+	{
+		// Centered - any other occurence of '8' marks an invalid position!
+		8,
+
+		// Up
+		0,
+
+		// Right
+		2,
+
+		// Up/right
+		1,
+
+		// Down
+		4, 8,
+
+		// Down/right
+		3, 8,
+
+		// Left
+		6,
+
+		// Up/left
+		7, 8, 8,
+
+		// Down/left
+		5, 8, 8, 8
+	};
+
+	// Arrays defining output button byte and bit locations in the output buffer
+	// (in accordance with the report descriptor!)
+	static unsigned int ButtonIndex[NR_OUT_BUTTONS]=
+	{
+		1, 1, 1, 1, 1, 1, 1, 1,
+		2, 2, 2, 2, 2, 2, 2, 2,
+		3, 3, 3, 3, 3, 3, 3, 3
+	};
+
+	static unsigned int ButtonBits[NR_OUT_BUTTONS]=
+	{
+		0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80,
+		0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80,
+		0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
+	};
+
+	// Array defining locations of the axes in the output buffer
+	// (in accordance with the report descriptor!)
+	static unsigned int AxisIndex[NR_OUT_AXES]=
+	{
+		4,	//X
+		6,	//Y
+		8,	//Z
+		10,	//RX
+		12,	//RY
+		14,	//RZ
+		16	//Slider
+	};
+
+	static unsigned int POVBits[4]=
+	{
+		0x01,0x02,0x04,0x08
+	};
+
+	/* Get pointer to device extension data */
+    PDEVICE_EXTENSION pDevExt=GET_MINIDRIVER_DEVICE_EXTENSION(pFdo);
+
+	// Quote from the DDK documentation:
+	// 'The RtlZeroMemory routine fills a block of memory with zeros, given a
+	// pointer to the block and the length, in bytes, to be filled.'
+
+	RtlZeroMemory(&OutData, sizeof(OutData));
+
+	// Fill all semiaxes from input data. Since the semiaxes are mapped to
+	// Windows gamecontrol items later (anyway), the sequence is chosen
+	// arbitrarily, directly from the order inside the gamepad data packet.
+	// NOTE: MAYBE THE OTHER HARDWIRED STUFF (I.E. THE BYTE AND BIT NUMBERS FROM
+	//       THE *INPUT* BUFFER) COULD BE MOVED TO #DEFINES AS WELL !!!
+
+	// Digital buttons first
+	// Button 'D-pad up' [0]
+	pDevExt->SemiAxes[0].Value=(pDevExt->hwInData[2])&0x01 ? MAX_VALUE : 0;
+
+	// Button 'D-pad down' [1]
+	pDevExt->SemiAxes[1].Value=(pDevExt->hwInData[2])&0x02 ? MAX_VALUE : 0;
+
+	// Button 'D-pad left' [2]
+	pDevExt->SemiAxes[2].Value=(pDevExt->hwInData[2])&0x04 ? MAX_VALUE : 0;
+
+	// Button 'D-pad right' [3]
+	pDevExt->SemiAxes[3].Value=(pDevExt->hwInData[2])&0x08 ? MAX_VALUE : 0;
+
+	// Button 'Start' [4]
+	pDevExt->SemiAxes[4].Value=(pDevExt->hwInData[2])&0x10 ? MAX_VALUE : 0;
+
+	// Button 'Back' [5]
+	pDevExt->SemiAxes[5].Value=(pDevExt->hwInData[2])&0x20 ? MAX_VALUE : 0;
+
+	// Button 'Left stick press' [6]
+	pDevExt->SemiAxes[6].Value=(pDevExt->hwInData[2])&0x40 ? MAX_VALUE : 0;
+
+	// Button 'Right stick press' [7]
+	pDevExt->SemiAxes[7].Value=(pDevExt->hwInData[2])&0x80 ? MAX_VALUE : 0;
+
+	// Now the analogue buttons
+	// Button 'A' [8]
+	pDevExt->SemiAxes[8].Value = MAX_VALUE * pDevExt->hwInData[4]/255;
+
+	// Button 'B' [9]
+	pDevExt->SemiAxes[9].Value = MAX_VALUE * pDevExt->hwInData[5]/255;
+
+	// Button 'X' [10]
+	pDevExt->SemiAxes[10].Value = MAX_VALUE * pDevExt->hwInData[6]/255;
+
+	// Button 'Y' [11]
+	pDevExt->SemiAxes[11].Value = MAX_VALUE * pDevExt->hwInData[7]/255;
+
+	// Button 'Black' [12]
+	pDevExt->SemiAxes[12].Value = MAX_VALUE * pDevExt->hwInData[8]/255;
+
+	// Button 'White' [13]
+	pDevExt->SemiAxes[13].Value = MAX_VALUE * pDevExt->hwInData[9]/255;
+
+	// Button 'Trigger left' [14]
+	pDevExt->SemiAxes[14].Value = MAX_VALUE * pDevExt->hwInData[10]/255;
+
+	// Button 'Trigger right' [15]
+	pDevExt->SemiAxes[15].Value = MAX_VALUE * pDevExt->hwInData[11]/255;
+
+	//And finally the analogue sticks (4 semiaxes each). Each negative semiaxis
+	//is inverted to positive!
+	//
+	// Left stick horizontal (=> 2 semiaxes, negative first) [16], [17]
+	SignedInt16=(pDevExt->hwInData[13])&0xff;
+	SignedInt16<<=8;
+	SignedInt16|=(pDevExt->hwInData[12])&0xff;
+	StickX = SignedInt16 < 0? (MAX_VALUE * SignedInt16/32768) : (MAX_VALUE * SignedInt16/32767);
+
+	// Left stick vertical (=> 2 semiaxes, negative first) [18], [19]
+	SignedInt16=(pDevExt->hwInData[15])&0xff;
+	SignedInt16<<=8;
+	SignedInt16|=(pDevExt->hwInData[14])&0xff;
+	StickY = SignedInt16 < 0? (MAX_VALUE * SignedInt16/32768) : (MAX_VALUE * SignedInt16/32767);
+
+	applyDeadzone2D(&StickX, &StickY, pDevExt->LStickDZ, pDevExt->bFullRange[0]);
+
+	pDevExt->SemiAxes[16].Value=StickX<0 ? -StickX : 0;
+	pDevExt->SemiAxes[17].Value=StickX>=0 ? StickX : 0;
+	pDevExt->SemiAxes[18].Value=StickY<0 ? -StickY : 0;
+	pDevExt->SemiAxes[19].Value=StickY>=0 ? StickY : 0;
+
+	// Right stick horizontal (=> 2 semiaxes, negative first) [20], [21]
+	SignedInt16=(pDevExt->hwInData[17])&0xff;
+	SignedInt16<<=8;
+	SignedInt16|=(pDevExt->hwInData[16])&0xff;
+	StickX = SignedInt16 < 0? (MAX_VALUE * SignedInt16/32768) : (MAX_VALUE * SignedInt16/32767);
+
+	// Right stick vertical (=> 2 semiaxes, negative first) [22], [23]
+	SignedInt16=(pDevExt->hwInData[19])&0xff;
+	SignedInt16<<=8;
+	SignedInt16|=(pDevExt->hwInData[18])&0xff;
+	StickY = SignedInt16 < 0? (MAX_VALUE * SignedInt16/32768) : (MAX_VALUE * SignedInt16/32767);
+
+	applyDeadzone2D(&StickX, &StickY, pDevExt->RStickDZ, pDevExt->bFullRange[1]);
+
+	pDevExt->SemiAxes[20].Value=StickX<0 ? -StickX : 0;
+	pDevExt->SemiAxes[21].Value=StickX>=0 ? StickX : 0;
+	pDevExt->SemiAxes[22].Value=StickY<0 ? -StickY : 0;
+	pDevExt->SemiAxes[23].Value=StickY>=0 ? StickY : 0;
+
+	//Copy the original data from the Xbox controller to the end of the buffer
+	RtlCopyMemory(&OutData[20], pDevExt->hwInData, sizeof(pDevExt->hwInData));
+
+	// Now make sure, no SemiAxes[].Value is bigger than 1.0f ! (This actually
+	// can happen through numerical inaccuracies)
+	for(index=0; index!=NR_SEMIAXES; index++)
+		if(pDevExt->SemiAxes[index].Value>MAX_VALUE) pDevExt->SemiAxes[index].Value=MAX_VALUE;
+
+	// If both analog control sticks are PRESSED, cycle layouts.
+	if((pDevExt->SemiAxes[6].Value > 0) && (pDevExt->SemiAxes[7].Value > 0))
+	{
+		// Only switch layout, if it has NOT been done the last time
+		if(!pDevExt->LayoutSwitch)
+		{
+			// DISALLOW layout switching next time
+			pDevExt->LayoutSwitch=TRUE;
+
+			pDevExt->LayoutNr++;
+			if(pDevExt->LayoutNr>=pDevExt->NrOfLayouts) pDevExt->LayoutNr=0;
 		}
 	}
 	else
 	{
-		//Button A
-		iTBuffer = pDevExt->intdata[4] & 255; //Pass the value of button A to iTBuffer
-		//If value of button is higher than the threshold value then button is active
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			xbdata[0] |= 1;
-		}
-
-		//Button B
-		iTBuffer = pDevExt->intdata[5] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			xbdata[0] |= 2;
-		}
-
-		//Button X
-		iTBuffer = pDevExt->intdata[6] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			xbdata[0] |= 4;
-		}
-
-		//Button Y
-		iTBuffer = pDevExt->intdata[7] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			xbdata[0] |= 8;
-		}
-
-		//Black Button
-		iTBuffer = pDevExt->intdata[8] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			xbdata[0] |= 16;
-		}
-
-		//White Button
-		iTBuffer = pDevExt->intdata[9] & 255;
-		if (iTBuffer >= pDevExt->BThreshold)
-		{
-			xbdata[0] |= 32;
-		}
-
-		if((pDevExt->intdata[2] & 16) && (pDevExt->intdata[2] & 32) && pDevExt->bTShortcut)
-		{
-			if(!pDevExt->bTShortcutTrigger)
-			{
-				pDevExt->bTShortcutTrigger = TRUE;
-				pDevExt->bTThrottle = !pDevExt->bTThrottle;
-			}
-		}
-		else
-		{
-			pDevExt->bTShortcutTrigger = FALSE;
-
-			//Start Button
-			if (pDevExt->intdata[2] & 16)
-			{
-				xbdata[0] |= 64;
-			}
-
-			//Back Button
-			if (pDevExt->intdata[2] & 32)
-			{
-				xbdata[0] |= 128;
-			}
-		}
-
-		//L-Stick Press
-		if (pDevExt->intdata[2] & 64)
-		{
-			xbdata[1] |= 1;
-		}
-
-		//R-Stick Press
-		if (pDevExt->intdata[2] & 128)
-		{
-			xbdata[1] |= 2;
-		}
-
-		if(!pDevExt->bTThrottle)
-		{
-			//L-Trigger Button
-			iTBuffer = pDevExt->intdata[10] & 255;
-			if (iTBuffer >= pDevExt->TThreshold)
-			{
-				xbdata[1] |= 4;
-			}
-
-			//R-Trigger Button
-			iTBuffer = pDevExt->intdata[11] & 255;
-			if (iTBuffer >= pDevExt->TThreshold)
-			{
-				xbdata[1] |= 8;
-			}
-		}
-
+		// ALLOW layout switching next time
+		pDevExt->LayoutSwitch=FALSE;
 	}
 
-	if (pDevExt->bDPadButtons)
+	OutData[19] = pDevExt->LayoutNr + 1;
+
+	/*!
+	Generate output data (i.e. fill the driver's data structure described by
+	the report descriptor)
+	Remember, OutData is zeroed above, so it doesn't need to be done here
+	(good for the buttons' OR operations).
+	This part, along with the mapping matrix has to contain
+	this driver's 'magic'...
+	*/
+
+	SignedInt16=0;
+
+	for(index=0; index!=NR_OUT_AXES; index++)
 	{
-		if(pDevExt->intdata[2] & 1)
-		{
-			KdPrint(("Up"));
-			xbdata[10] |= 16;
-		}
-		if(pDevExt->intdata[2] & 8)
-		{
-			KdPrint(("Right"));
-			xbdata[10] |= 32;
-		}
-		if(pDevExt->intdata[2] & 2)
-		{
-			KdPrint(("Down"));
-			xbdata[10] |= 64;
-		}
-		if(pDevExt->intdata[2] & 4)
-		{
-			KdPrint(("Left"));
-			xbdata[10] |= 128;
-		}
+		PreOutAxes[index] = 0;
 	}
 
-	// If both analog sticks are pressed then switch control between D-pad, L-stick, and R-stick
-	if ((pDevExt->intdata[2] & 64) && (pDevExt->intdata[2] & 128))
+	for(index=0; index!=24; index++)
 	{
-		if (!pDevExt->StickSwitch)
+		if(pDevExt->MapMatrix[pDevExt->LayoutNr][index] == 0)
 		{
-			pDevExt->StickSwitch = TRUE;
+			//Not assigned to anything
+		}
 
-			pDevExt->iCurrentConf += 1;
+		if((pDevExt->MapMatrix[pDevExt->LayoutNr][index] >= 1) && (pDevExt->MapMatrix[pDevExt->LayoutNr][index] <= 24))
+		{
+			//It's a button
 
-			if(pDevExt->iCurrentConf > (pDevExt->iNumConf - 1))
+			if((index >= 8) && (index <= 13))
 			{
-				pDevExt->iCurrentConf = 0;
-			}
-
-			switch(pDevExt->iConf[pDevExt->iCurrentConf])
-			{
-			case 1:
-				{
-					pDevExt->iXYMov = 2;
-					pDevExt->iPOV = 1;
-					pDevExt->iSlider = 4;
-					break;
-				}
-			case 2:
-				{
-					pDevExt->iXYMov = 1;
-					pDevExt->iPOV = 4;
-					pDevExt->iSlider = 2;
-					break;
-				}
-			case 3:
-				{
-					pDevExt->iXYMov = 4;
-					pDevExt->iPOV = 2;
-					pDevExt->iSlider = 1;
-					break;
-				}
-			case 4:
-				{
-					pDevExt->iXYMov = 2;
-					pDevExt->iPOV = 4;
-					pDevExt->iSlider = 1;
-					break;
-				}
-			case 5:
-				{
-					pDevExt->iXYMov = 4;
-					pDevExt->iPOV = 1;
-					pDevExt->iSlider = 2;
-					break;
-				}
-			case 6:
-				{
-					pDevExt->iXYMov = 1;
-					pDevExt->iPOV = 2;
-					pDevExt->iSlider = 4;
-					break;
-				}
-			case 7:
-				{
-					pDevExt->iXYMov = 1;
-					pDevExt->iXYMov |= 2;
-					pDevExt->iPOV = 0;
-					pDevExt->iSlider = 4;
-					break;
-				}
-			case 8:
-				{
-					pDevExt->iXYMov = 1;
-					pDevExt->iXYMov |= 2;
-					pDevExt->iPOV = 4;
-					pDevExt->iSlider = 0;
-					break;
-				}
-			}
-		}
-	}
-	else
-	{
-		pDevExt->StickSwitch = FALSE;
-	}
-
-	// X/Y Movement
-	xdata = 0;
-	ydata = 0;
-	if((pDevExt->iXYMov & 2) || (pDevExt->iXYMov & 4))
-	{
-		int iDeadZone;
-		int iXYControl;
-		if(pDevExt->iXYMov & 2)
-		{
-			iDeadZone = pDevExt->LStickDZ;
-			iXYControl = 12;
-		}
-		else
-		{
-			if(pDevExt->iXYMov & 4)
-			{
-				iDeadZone = pDevExt->RStickDZ;
-				iXYControl = 16;
-			}
-		}
-
-		xbdata[2] = pDevExt->intdata[iXYControl] & 255;
-		xbdata[3] = pDevExt->intdata[iXYControl + 1] & 255;
-
-		xdata = xbdata[3] << 8;
-		xdata |= xbdata[2];
-
-		xbdata[4] = (pDevExt->intdata[iXYControl + 2] & 255) ^ 255;
-		xbdata[5] = (pDevExt->intdata[iXYControl + 3] & 255) ^ 255;
-
-		ydata = xbdata[5] << 8;
-		ydata |= xbdata[4];
-
-		CalcAxes(&xdata, &ydata, iDeadZone, pDevExt);
-	}
-
-	if ((pDevExt->iXYMov & 1) && !pDevExt->bDPadButtons)
-	{
-		if(pDevExt->intdata[2] & 8)
-		{
-			KdPrint(("Right"));
-			xdata = 32767;
-		}
-		else
-		{
-			if(pDevExt->intdata[2] & 4)
-			{
-				KdPrint(("Left"));
-				xdata = -32767;
-			}
-		}
-
-		if(pDevExt->intdata[2] & 2)
-		{
-			KdPrint(("Down"));
-			ydata = 32767;
-		}
-		else
-		{
-			if(pDevExt->intdata[2] & 1)
-			{
-				KdPrint(("Up"));
-				ydata = -32767;
-			}
-		}
-	}
-
-	RtlCopyMemory(&xbdata[2], &xdata, sizeof(xdata));
-	RtlCopyMemory(&xbdata[4], &ydata, sizeof(ydata));
-
-	// POV Hat Switch
-	xbdata[10] |= 8;
-	if((pDevExt->iPOV & 2) || (pDevExt->iPOV & 4))
-	{
-		int iPOVControl;
-		if(pDevExt->iPOV & 2)
-		{
-			iPOVControl = 12;
-		}
-		else
-		{
-			if(pDevExt->iPOV & 4)
-			{
-				iPOVControl = 16;
-			}
-		}
-
-		if((pDevExt->intdata[iPOVControl + 1] & 255) == 127)
-		{
-			KdPrint(("Right"));
-			xbdata[10] = 2;
-		}
-
-		if((pDevExt->intdata[iPOVControl + 1] & 255) == 128)
-		{
-			KdPrint(("Left"));
-			xbdata[10] = 6;
-		}
-
-		if((pDevExt->intdata[iPOVControl + 3] & 255) == 128)
-		{
-			KdPrint(("Down"));
-			xbdata[10] = 4;
-		}
-
-		if((pDevExt->intdata[iPOVControl + 3] & 255) == 127)
-		{
-			KdPrint(("Up"));
-			xbdata[10] = 0;
-		}
-
-
-		if((((pDevExt->intdata[iPOVControl + 3] & 255) < 127) && ((pDevExt->intdata[iPOVControl + 3] & 255) > 50)) && (((pDevExt->intdata[iPOVControl + 1] & 255) < 127) && (pDevExt->intdata[iPOVControl + 1] & 255) > 50))
-		{
-			xbdata[10] = 1;
-		}
-
-		if((((pDevExt->intdata[iPOVControl + 1] & 255) < 127) && ((pDevExt->intdata[iPOVControl + 1] & 255) > 50)) && (((pDevExt->intdata[iPOVControl + 3] & 255) > 128) && (pDevExt->intdata[iPOVControl + 3] & 255) < 205))
-		{
-			xbdata[10] = 3;
-		}
-
-		if((((pDevExt->intdata[iPOVControl + 3] & 255) > 128) && ((pDevExt->intdata[iPOVControl + 3] & 255) < 205)) && (((pDevExt->intdata[iPOVControl + 1] & 255) > 128) && (pDevExt->intdata[iPOVControl + 1] & 255) < 205))
-		{
-			xbdata[10] = 5;
-		}
-
-		if((((pDevExt->intdata[iPOVControl + 1] & 255) > 128) && ((pDevExt->intdata[iPOVControl + 1] & 255) < 205)) && (((pDevExt->intdata[iPOVControl + 3] & 255) < 127) && (pDevExt->intdata[iPOVControl + 1] & 255) > 50))
-		{
-			xbdata[10] = 7;
-		}
-	}
-
-	if ((pDevExt->iPOV & 1) && !pDevExt->bDPadButtons)
-	{
-		if(pDevExt->intdata[2] & 8)
-		{
-			KdPrint(("Right"));
-			xbdata[10] = 2;
-		}
-
-		if(pDevExt->intdata[2] & 4)
-		{
-			KdPrint(("Left"));
-			xbdata[10] = 6;
-		}
-
-		if(pDevExt->intdata[2] & 2)
-		{
-			KdPrint(("Down"));
-			xbdata[10] = 4;
-		}
-
-		if(pDevExt->intdata[2] & 1)
-		{
-			KdPrint(("Up"));
-			xbdata[10] = 0;
-		}
-
-		if((pDevExt->intdata[2] & 1) && (pDevExt->intdata[2] & 8))
-		{
-			xbdata[10] = 1;
-		}
-
-		if((pDevExt->intdata[2] & 8) && (pDevExt->intdata[2] & 2))
-		{
-			xbdata[10] = 3;
-		}
-
-		if((pDevExt->intdata[2] & 2) && (pDevExt->intdata[2] & 4))
-		{
-			xbdata[10] = 5;
-		}
-
-		if((pDevExt->intdata[2] & 4) && (pDevExt->intdata[2] & 1))
-		{
-			xbdata[10] = 7;
-		}
-	}
-
-	// Throttle and Rudder
-	xdata = 0;
-	ydata = 0;
-	if((pDevExt->iSlider & 2) || (pDevExt->iSlider & 4))
-	{
-		int iDeadZone;
-		int iSliderControl;
-		if(pDevExt->iSlider & 2)
-		{
-			iDeadZone = pDevExt->LStickDZ;
-			iSliderControl = 12;
-		}
-		else
-		{
-			if(pDevExt->iSlider & 4)
-			{
-				iDeadZone = pDevExt->RStickDZ;
-				iSliderControl = 16;
-			}
-		}
-
-		if(!pDevExt->bSSwitch)
-		{
-			xbdata[6] = pDevExt->intdata[iSliderControl] & 255;
-			xbdata[7] = pDevExt->intdata[iSliderControl + 1] & 255;
-
-			xdata = xbdata[7] << 8;
-			xdata |= xbdata[6];
-
-			xbdata[8] = (pDevExt->intdata[iSliderControl + 2] & 255) ^ 255;
-			xbdata[9] = (pDevExt->intdata[iSliderControl + 3] & 255) ^ 255;
-
-			ydata = xbdata[9] << 8;
-			ydata |= xbdata[8];
-
-			if(!pDevExt->bTThrottle)
-			{
-				CalcAxes(&xdata, &ydata, iDeadZone, pDevExt);
+				if(pDevExt->SemiAxes[index].Value < pDevExt->BThreshold)
+					pDevExt->SemiAxes[index].Value=0;
 			}
 			else
 			{
-				/*if(pDevExt->btnset)
+				if((index==14) || (index==15))
 				{
-					if (ydata < -32500)
-					{
-						btndata |= pDevExt->buttons[10];
-					}
-
-					if (ydata > 32500)
-					{
-						btndata |= pDevExt->buttons[11];
-					}
+					if(pDevExt->SemiAxes[index].Value < pDevExt->TThreshold)
+						pDevExt->SemiAxes[index].Value=0;
 				}
 				else
 				{
-					if (ydata < -32500)
+					if((index >= 16) && (index <= 23))
 					{
-						xbdata[1] |= 4;
+						if(pDevExt->SemiAxes[index].Value < pDevExt->AThreshold)
+							pDevExt->SemiAxes[index].Value=0;
 					}
-
-					if (ydata > 32500)
-					{
-						xbdata[1] |= 8;
-					}
-				}*/
-
-				ydata = 0;
-				CalcAxes(&xdata, &ydata, iDeadZone, pDevExt);
-
-				//L-Trigger Button - R-Trigger Button
-				iTBuffer = (pDevExt->intdata[10] & 255) - (pDevExt->intdata[11] & 255);
-
-				ydata = 32767 * iTBuffer/255;
+				}
 			}
+
+			if(pDevExt->SemiAxes[index].Value > 0)
+				OutData[ButtonIndex[pDevExt->MapMatrix[pDevExt->LayoutNr][index]-1]] |= ButtonBits[pDevExt->MapMatrix[pDevExt->LayoutNr][index]-1];
 		}
-		else
+
+		if((pDevExt->MapMatrix[pDevExt->LayoutNr][index] >= 25) && (pDevExt->MapMatrix[pDevExt->LayoutNr][index] <= 38))
 		{
-			xbdata[6] = pDevExt->intdata[iSliderControl] & 255;
-			xbdata[7] = pDevExt->intdata[iSliderControl + 1] & 255;
+			//It's part of an axis
 
-			ydata = xbdata[7] << 8;
-			ydata |= xbdata[6];
+			int AxIndex;
+			int AxIndex2 = pDevExt->MapMatrix[pDevExt->LayoutNr][index]-25;
 
-			xbdata[8] = (pDevExt->intdata[iSliderControl + 2] & 255) ^ 255;
-			xbdata[9] = (pDevExt->intdata[iSliderControl + 3] & 255) ^ 255;
+			AxIndex = AxIndex2/2;
 
-			xdata = xbdata[9] << 8;
-			xdata |= xbdata[8];
-
-			if(!pDevExt->bTThrottle)
+			if((AxIndex*2) == AxIndex2)
 			{
-				CalcAxes(&xdata, &ydata, iDeadZone, pDevExt);
+				//Negative side of axis
+
+				if(PreOutAxes[AxIndex] < 0)
+				{
+					if(-pDevExt->SemiAxes[index].Value < PreOutAxes[AxIndex])
+						PreOutAxes[AxIndex] = -pDevExt->SemiAxes[index].Value;
+				}
+				else
+					PreOutAxes[AxIndex] -= pDevExt->SemiAxes[index].Value;
 			}
 			else
 			{
-				/*if(pDevExt->btnset)
-				{
-					if (ydata < -32500)
-					{
-						btndata |= pDevExt->buttons[10];
-					}
+				//Positive side of axis
 
-					if (ydata > 32500)
-					{
-						btndata |= pDevExt->buttons[11];
-					}
+				if(PreOutAxes[AxIndex] >= 0)
+				{
+					if(pDevExt->SemiAxes[index].Value > PreOutAxes[AxIndex])
+						PreOutAxes[AxIndex] = pDevExt->SemiAxes[index].Value;
+				}
+				else
+					PreOutAxes[AxIndex] += pDevExt->SemiAxes[index].Value;
+			}
+		}
+
+		if((pDevExt->MapMatrix[pDevExt->LayoutNr][index] >= 39) && (pDevExt->MapMatrix[pDevExt->LayoutNr][index] <= 42))
+		{
+			//It's a POV direction
+
+			int POVIndex = pDevExt->MapMatrix[pDevExt->LayoutNr][index]-39;
+
+			if((index >= 8) && (index <= 13))
+			{
+				if(pDevExt->SemiAxes[index].Value < pDevExt->BThreshold)
+					pDevExt->SemiAxes[index].Value=0;
+			}
+			else
+			{
+				if((index==14) || (index==15))
+				{
+					if(pDevExt->SemiAxes[index].Value < pDevExt->TThreshold)
+						pDevExt->SemiAxes[index].Value=0;
 				}
 				else
 				{
-					if (ydata < -32500)
+					if((index >= 16) && (index <= 23))
 					{
-						xbdata[1] |= 4;
+						if(pDevExt->SemiAxes[index].Value < pDevExt->AThreshold)
+							pDevExt->SemiAxes[index].Value=0;
 					}
-
-					if (ydata > 32500)
-					{
-						xbdata[1] |= 8;
-					}
-				}*/
-
-				xdata = 0;
-				CalcAxes(&xdata, &ydata, iDeadZone, pDevExt);
-
-				//L-Trigger Button - R-Trigger Button
-				iTBuffer = (pDevExt->intdata[10] & 255) - (pDevExt->intdata[11] & 255);
-
-				xdata = 32767 * iTBuffer/255;
+				}
 			}
+
+			// Build truth table index from semiaxes
+			if(pDevExt->SemiAxes[index].Value > 0)
+				SignedInt16 |= POVBits[POVIndex];
 		}
 	}
 
-	if ((pDevExt->iSlider & 1) && !pDevExt->bDPadButtons)
+	// Output POV (using the truth table defined above...)
+	OutData[OUT_POV1_INDEX] = OutPovValue[SignedInt16];
+
+	// Write to output axes (converted to integers with proper range!)
+	for(index=0; index!=NR_OUT_AXES; index++)
 	{
-		if(!pDevExt->bSSwitch)
-		{
-			if(pDevExt->intdata[2] & 8)
-			{
-				KdPrint(("Right"));
-				xdata = 32767;
-			}
-			else
-			{
-				if(pDevExt->intdata[2] & 4)
-				{
-					KdPrint(("Left"));
-					xdata = -32767;
-				}
-			}
-
-			if(!pDevExt->bTThrottle)
-			{
-				if(pDevExt->intdata[2] & 2)
-				{
-					KdPrint(("Down"));
-					ydata = 32767;
-				}
-				else
-				{
-					if(pDevExt->intdata[2] & 1)
-					{
-						KdPrint(("Up"));
-						ydata = -32767;
-					}
-				}
-			}
-			else
-			{
-				short tempThrottle;
-
-				RtlZeroMemory(&tempThrottle, sizeof(tempThrottle));
-
-				//L-Trigger Button - R-Trigger Button
-				iTBuffer = (pDevExt->intdata[10] & 255) - (pDevExt->intdata[11] & 255);
-
-				tempThrottle = 32767 * iTBuffer/255;
-
-				ydata = tempThrottle;
-
-				if(pDevExt->btnset)
-				{
-					if (pDevExt->intdata[2] & 1)
-					{
-						btndata |= pDevExt->buttons[10];
-					}
-
-					if (pDevExt->intdata[2] & 2)
-					{
-						btndata |= pDevExt->buttons[11];
-					}
-				}
-				else
-				{
-					if (pDevExt->intdata[2] & 1)
-					{
-						xbdata[1] |= 4;
-					}
-
-					if (pDevExt->intdata[2] & 2)
-					{
-						xbdata[1] |= 8;
-					}
-				}
-			}
-		}
-		else
-		{
-			if(pDevExt->intdata[2] & 8)
-			{
-				KdPrint(("Right"));
-				ydata = 32767;
-			}
-			else
-			{
-				if(pDevExt->intdata[2] & 4)
-				{
-					KdPrint(("Left"));
-					ydata = -32767;
-				}
-			}
-
-			if(!pDevExt->bTThrottle)
-			{
-				if(pDevExt->intdata[2] & 2)
-				{
-					KdPrint(("Down"));
-					xdata = 32767;
-				}
-				else
-				{
-					if(pDevExt->intdata[2] & 1)
-					{
-						KdPrint(("Up"));
-						xdata = -32767;
-					}
-				}
-			}
-			else
-			{
-				short tempThrottle;
-
-				RtlZeroMemory(&tempThrottle, sizeof(tempThrottle));
-
-				//L-Trigger Button - R-Trigger Button
-				iTBuffer = (pDevExt->intdata[10] & 255) - (pDevExt->intdata[11] & 255);
-
-				tempThrottle = 32767 * iTBuffer/255;
-
-				xdata = tempThrottle;
-
-				if(pDevExt->btnset)
-				{
-					if (pDevExt->intdata[2] & 1)
-					{
-						btndata |= pDevExt->buttons[10];
-					}
-
-					if (pDevExt->intdata[2] & 2)
-					{
-						btndata |= pDevExt->buttons[11];
-					}
-				}
-				else
-				{
-					if (pDevExt->intdata[2] & 1)
-					{
-						xbdata[1] |= 4;
-					}
-
-					if (pDevExt->intdata[2] & 2)
-					{
-						xbdata[1] |= 8;
-					}
-				}
-			}
-		}
+		//Rescale for less sensitive axes
+		PreOutAxes[index] = PreOutAxes[index] * pDevExt->AxesScale[index]/MAX_VALUE;
+		SignedInt16=(__int16)(OUT_AXIS_SCALE * PreOutAxes[index]/MAX_VALUE);
+		OutData[AxisIndex[index]]=(UCHAR)(SignedInt16&0xff);
+		OutData[AxisIndex[index]+1]=(UCHAR)((SignedInt16>>8)&0xff);
 	}
 
-	if(pDevExt->btnset)
-		RtlCopyMemory(&xbdata, &btndata, sizeof(btndata));
+	OutData[0] = 1; //Report ID
+	/*! Debug output */
+	KdPrint(("SIXCDReadData - Win: %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x",
+		OutData[1], OutData[2], OutData[3], OutData[4], OutData[5], OutData[6], OutData[7],
+		OutData[8], OutData[9], OutData[10], OutData[11], OutData[12], OutData[13],
+		OutData[14], OutData[15], OutData[16], OutData[17], OutData[18]));
+	KdPrint(("SIXCDReadData - Xbox: %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x %2x",
+		OutData[20], OutData[21], OutData[22], OutData[23], OutData[24], OutData[25], OutData[26],
+		OutData[27], OutData[28], OutData[29], OutData[30], OutData[31], OutData[32], OutData[33],
+		OutData[34], OutData[35], OutData[36], OutData[37], OutData[38], OutData[39]));
 
-	RtlCopyMemory(&xbdata[6], &xdata, sizeof(xdata));
-	RtlCopyMemory(&xbdata[8], &ydata, sizeof(ydata));
-
-	KdPrint(("SIXCDReadData - IOCTL_HID_READ_REPORT, report obtained - %xh %xh %xh %xh", pDevExt->intdata[12], pDevExt->intdata[13], pDevExt->intdata[14], pDevExt->intdata[15]));
-	RtlCopyMemory(pIrp->UserBuffer, xbdata, sizeof(xbdata));
-	pIrp->IoStatus.Information = sizeof(xbdata);
-	pIrp->IoStatus.Status = STATUS_SUCCESS;
+	RtlCopyMemory(pIrp->UserBuffer, OutData, sizeof(OutData));
+	pIrp->IoStatus.Information=sizeof(OutData);
+	pIrp->IoStatus.Status=STATUS_SUCCESS;
 	IoCompleteRequest(pIrp, IO_NO_INCREMENT);
-
+	
 	return STATUS_SUCCESS;
 }
 
@@ -1156,80 +902,15 @@ VOID timerDPCProc(IN PKDPC Dpc, IN PDEVICE_EXTENSION pDevExt, IN PVOID SystemArg
 	pDevExt->timerEnabled = FALSE;
 }
 
-//+static void hid_fixup_ps3(struct usb_device * dev, int ifnum)
-//+{
-//+	char * buf;
-//+	int ret;
-//+
-//+	buf = kmalloc(18, GFP_KERNEL);
-//+	if (!buf)
-//+		return;
-//+	
-//+	ret = usb_control_msg(dev, /*usb_dev_handle *dev*/
-//+			      usb_rcvctrlpipe(dev, 0), /*unsigned int pipe*/
-//+			      0x01 /*HID_REQ_GET_REPORT*/, /*__u8 request*/
-//+			      0xA1 /*USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE*/, /*__u8 requesttype*/
-//+			      0x03F2 /*(3 << 8) | 0xf2*/, /*__u16 value*/
-//+			      ifnum, /*__u16 index*/
-//+			      buf, /*void * data*/
-//+			      17, /*__u16 size*/
-//+			      5000 /*USB_CTRL_GET_TIMEOUT*/); /*int timeout*/
-//+	if (ret < 0)
-//+		printk(KERN_ERR "%s: ret=%d\n", __FUNCTION__, ret);
-//+
-//+	kfree(buf);
-//+}
-
-//#define HID_REQ_GET_REPORT              0x01
-
-//#define USB_DIR_IN                      0x80			b'10000000
-//#define USB_TYPE_CLASS                  (0x01 << 5)	b'00100000
-//#define USB_RECIP_INTERFACE             0x01			b'00000001
-// USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE =	b'10100001
-//
-// bmRequestType
-// D[7]: Data Xfer Dir
-// D[6:5]: Type
-// D[4:0]: Recipient
-
-//#define USB_CTRL_GET_TIMEOUT    5000
-
-//UsbBuildVendorRequest(urb, \
-//                              cmd, \
-//                              length, \
-//                              transferFlags, \
-//                              reservedbits, \
-//                              request, \
-//                              value, \
-//                              index, \
-//                              transferBuffer, \
-//                              transferBufferMDL, \
-//                              transferBufferLength, \
-//                              link) { \
-//            (urb)->UrbHeader.Function =  cmd; \
-//            (urb)->UrbHeader.Length = (length); \
-//            (urb)->UrbControlVendorClassRequest.TransferBufferLength = (transferBufferLength); \
-//            (urb)->UrbControlVendorClassRequest.TransferBufferMDL = (transferBufferMDL); \
-//            (urb)->UrbControlVendorClassRequest.TransferBuffer = (transferBuffer); \
-//            (urb)->UrbControlVendorClassRequest.RequestTypeReservedBits = (reservedbits); \
-//            (urb)->UrbControlVendorClassRequest.Request = (request); \
-//            (urb)->UrbControlVendorClassRequest.Value = (value); \
-//            (urb)->UrbControlVendorClassRequest.Index = (index); \
-//            (urb)->UrbControlVendorClassRequest.TransferFlags = (transferFlags); \
-//            (urb)->UrbControlVendorClassRequest.UrbLink = (link); }
-//
-//b'0000 0001 1010 0001
-//#define URB_FUNCTION_CLASS_INTERFACE                 0x001B 'b0000 0000 0001 1011
-//#define URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE      0x000B 'b0000 0000 0000 1011
+#pragma LOCKEDCODE
 NTSTATUS EnableSixaxis(PDEVICE_EXTENSION pDevExt)
-	{
+{
 
 	NTSTATUS status;
 	PIRP pIrp;
 	IO_STATUS_BLOCK iostatus;
 	PIO_STACK_LOCATION stack;
 	KEVENT event;
-	char * buf;
 	PURB urb = (PURB)ExAllocatePool(NonPagedPool, sizeof(struct _URB_CONTROL_VENDOR_OR_CLASS_REQUEST));
 	char * buf = (char *)ExAllocatePool(NonPagedPool, 18);
 
@@ -1245,7 +926,8 @@ NTSTATUS EnableSixaxis(PDEVICE_EXTENSION pDevExt)
 		0x01, 
 		buf, 
 		NULL, 
-		17);
+		17,
+		NULL);
 
 	KeInitializeEvent(&event, NotificationEvent, FALSE);
 
@@ -1279,14 +961,6 @@ NTSTATUS EnableSixaxis(PDEVICE_EXTENSION pDevExt)
 	KdPrint(("EnableSixaxis - returning"));
 
 	return status;
-}
-void enable_sixaxis()
-{
-	char msg[] = { 0x53 /*HIDP_TRANS_SET_REPORT | HIDP_DATA_RTYPE_FEATURE*/,
-		0xf4,  0x42, 0x03, 0x00, 0x00 };\
-	PURB Urb;
-
-	UsbBuildSelectInterfaceRequest(
 }
 
 #pragma LOCKEDCODE
