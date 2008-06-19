@@ -1156,15 +1156,137 @@ VOID timerDPCProc(IN PKDPC Dpc, IN PDEVICE_EXTENSION pDevExt, IN PVOID SystemArg
 	pDevExt->timerEnabled = FALSE;
 }
 
-//static void enable_sixaxis(int sock){
-//  char msg[] = { 0x53 /*HIDP_TRANS_SET_REPORT | HIDP_DATA_RTYPE_FEATURE*/,
-//		 0xf4,  0x42, 0x03, 0x00, 0x00 };
-//  send(sock, msg, sizeof(msg), 0);
-//}
+//+static void hid_fixup_ps3(struct usb_device * dev, int ifnum)
+//+{
+//+	char * buf;
+//+	int ret;
+//+
+//+	buf = kmalloc(18, GFP_KERNEL);
+//+	if (!buf)
+//+		return;
+//+	
+//+	ret = usb_control_msg(dev, /*usb_dev_handle *dev*/
+//+			      usb_rcvctrlpipe(dev, 0), /*unsigned int pipe*/
+//+			      0x01 /*HID_REQ_GET_REPORT*/, /*__u8 request*/
+//+			      0xA1 /*USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE*/, /*__u8 requesttype*/
+//+			      0x03F2 /*(3 << 8) | 0xf2*/, /*__u16 value*/
+//+			      ifnum, /*__u16 index*/
+//+			      buf, /*void * data*/
+//+			      17, /*__u16 size*/
+//+			      5000 /*USB_CTRL_GET_TIMEOUT*/); /*int timeout*/
+//+	if (ret < 0)
+//+		printk(KERN_ERR "%s: ret=%d\n", __FUNCTION__, ret);
+//+
+//+	kfree(buf);
+//+}
+
+//#define HID_REQ_GET_REPORT              0x01
+
+//#define USB_DIR_IN                      0x80			b'10000000
+//#define USB_TYPE_CLASS                  (0x01 << 5)	b'00100000
+//#define USB_RECIP_INTERFACE             0x01			b'00000001
+// USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE =	b'10100001
+//
+// bmRequestType
+// D[7]: Data Xfer Dir
+// D[6:5]: Type
+// D[4:0]: Recipient
+
+//#define USB_CTRL_GET_TIMEOUT    5000
+
+//UsbBuildVendorRequest(urb, \
+//                              cmd, \
+//                              length, \
+//                              transferFlags, \
+//                              reservedbits, \
+//                              request, \
+//                              value, \
+//                              index, \
+//                              transferBuffer, \
+//                              transferBufferMDL, \
+//                              transferBufferLength, \
+//                              link) { \
+//            (urb)->UrbHeader.Function =  cmd; \
+//            (urb)->UrbHeader.Length = (length); \
+//            (urb)->UrbControlVendorClassRequest.TransferBufferLength = (transferBufferLength); \
+//            (urb)->UrbControlVendorClassRequest.TransferBufferMDL = (transferBufferMDL); \
+//            (urb)->UrbControlVendorClassRequest.TransferBuffer = (transferBuffer); \
+//            (urb)->UrbControlVendorClassRequest.RequestTypeReservedBits = (reservedbits); \
+//            (urb)->UrbControlVendorClassRequest.Request = (request); \
+//            (urb)->UrbControlVendorClassRequest.Value = (value); \
+//            (urb)->UrbControlVendorClassRequest.Index = (index); \
+//            (urb)->UrbControlVendorClassRequest.TransferFlags = (transferFlags); \
+//            (urb)->UrbControlVendorClassRequest.UrbLink = (link); }
+//
+//b'0000 0001 1010 0001
+//#define URB_FUNCTION_CLASS_INTERFACE                 0x001B 'b0000 0000 0001 1011
+//#define URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE      0x000B 'b0000 0000 0000 1011
+NTSTATUS EnableSixaxis(PDEVICE_EXTENSION pDevExt)
+	{
+
+	NTSTATUS status;
+	PIRP pIrp;
+	IO_STATUS_BLOCK iostatus;
+	PIO_STACK_LOCATION stack;
+	KEVENT event;
+	char * buf;
+	PURB urb = (PURB)ExAllocatePool(NonPagedPool, sizeof(struct _URB_CONTROL_VENDOR_OR_CLASS_REQUEST));
+	char * buf = (char *)ExAllocatePool(NonPagedPool, 18);
+
+
+	KdPrint(("EnableSixaxis - Building urb"));
+	UsbBuildVendorRequest(urb, 
+		URB_FUNCTION_CLASS_DEVICE, 
+		sizeof(struct _URB_CONTROL_VENDOR_OR_CLASS_REQUEST),
+		0,
+		0, 
+		0x01, 
+		(3 << 8) | 0xf2, 
+		0x01, 
+		buf, 
+		NULL, 
+		17);
+
+	KeInitializeEvent(&event, NotificationEvent, FALSE);
+
+	pIrp = IoBuildDeviceIoControlRequest(IOCTL_INTERNAL_USB_SUBMIT_URB,
+		pDevExt->pLowerPdo, NULL, 0, NULL, 0, TRUE, &event, &iostatus);
+
+	if (!pIrp)
+		{
+			KdPrint(("EnableSixaxis - Unable to allocate IRP for sending URB"));
+			return STATUS_INSUFFICIENT_RESOURCES;
+		}
+
+	stack = IoGetNextIrpStackLocation(pIrp);
+	stack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+	stack->Parameters.Others.Argument1 = urb;
+	status = IoCallDriver(pDevExt->pLowerPdo, pIrp);
+	if (status == STATUS_PENDING)
+		{
+			KdPrint(("EnableSixaxis - status_pending"));
+			KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
+			status = iostatus.Status;
+		}
+	if(NT_SUCCESS(status))
+	{
+		KdPrint(("EnableSixaxis - status success"));
+	}
+	else
+	{
+		KdPrint(("EnableSixaxis - error %d", status));
+	}
+	KdPrint(("EnableSixaxis - returning"));
+
+	return status;
+}
 void enable_sixaxis()
 {
 	char msg[] = { 0x53 /*HIDP_TRANS_SET_REPORT | HIDP_DATA_RTYPE_FEATURE*/,
-		0xf4,  0x42, 0x03, 0x00, 0x00 };
+		0xf4,  0x42, 0x03, 0x00, 0x00 };\
+	PURB Urb;
+
+	UsbBuildSelectInterfaceRequest(
 }
 
 #pragma LOCKEDCODE
