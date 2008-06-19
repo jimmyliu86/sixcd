@@ -1,0 +1,16 @@
+# The sources for the SIXCD device driver:
+
+TARGETNAME=SIXCD
+TARGETPATH=obj
+TARGETTYPE=DRIVER
+DRIVERTYPE=WDM
+TARGETLIBS=	hidclass.lib \
+		usbd.lib
+
+
+SOURCES=SIXCD_driver.c \
+	SIXCD_control.c \
+	SIXCD_report.c \
+	SIXCD_usb.c \
+	SIXCD.rc \
+	RemoveLock.c
