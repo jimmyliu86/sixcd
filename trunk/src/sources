@@ -1,0 +1,18 @@
+TARGETNAME=sixcd
+TARGETTYPE=DRIVER
+
+
+KMDF_VERSION_MAJOR=1
+
+TARGETLIBS=$(DDK_LIB_PATH)\hidclass.lib \
+                     $(DDK_LIB_PATH)\ntstrsafe.lib
+
+INCLUDES=..\inc
+
+SOURCES= \
+     driver.c        \
+        device.c     \
+
+INF_NAME=sixcd
+NTTARGETFILES=$(OBJ_PATH)\$(O)\$(INF_NAME).inf
+MISCFILES=$(NTTARGETFILES)

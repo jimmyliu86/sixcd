@@ -1,0 +1,106 @@
+[Version]
+Signature	= "$Windows NT$"
+Class		= HIDClass
+ClassGuid	= {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider	= %ProviderName%
+DriverVer	= 07/01/2008,1.0.0.0
+CatalogFile	= sixcd.cat
+
+
+[Manufacturer]
+%ProviderName%	= MyDevice_HIDFilter,NTx86,NTamd64
+
+[MyDevice_HIDFilter.NTx86]
+%USB\MyDevice.DeviceDesc%	=USB_Install, HID\VID_054C&PID_0268&REV_0100,USB\VID_054C&PID_0268,HID_DEVICE_SYSTEM_GAME
+
+[MyDevice_HIDFilter.NTamd64]
+%USB\MyDevice.DeviceDesc%	=USB_Install, HID\VID_054C&PID_0268&REV_0100,USB\VID_054C&PID_0268,HID_DEVICE_SYSTEM_GAME
+
+; ============================ Installation ============================
+
+; [1]
+[USB_Install]
+CopyFiles	= hidkmdf_CopyFiles, Filter_CopyFiles
+
+[hidkmdf_CopyFiles]
+hidkmdf.sys
+
+[Filter_CopyFiles]
+sixcd.sys
+
+; [2]
+[USB_Install.Services]
+AddService	= hidkmdf,0x00000002,hidkmdf_ServiceInstall
+AddService	= sixcd,0x00000002,Filter_ServiceInstall
+
+; [3]
+[hidkmdf_ServiceInstall]
+DisplayName	= %hidkmdf_SvcDesc%
+ServiceType	= 1 ;SERVICE_KERNEL_DRIVER
+StartType	= 3 ;SERVICE_DEMAND_START
+ErrorControl	= 1 ;SERVICE_ERROR_NORMAL
+ServiceBinary	= %12%\hidkmdf.sys
+
+[Filter_ServiceInstall]
+DisplayName	= %Filter_SvcDesc%
+ServiceType	= 1 ;SERVICE_KERNEL_DRIVER
+StartType	= 3 ;SERVICE_DEMAND_START
+ErrorControl	= 0 ;SERVICE_ERROR_IGNORE
+ServiceBinary	= %12%\sixcd.sys
+LoadOrderGroup	= PNP Filter
+
+; [4]
+[USB_Install.Wdf]
+KmdfService	= sixcd,Filter_Install
+
+[Filter_Install]
+KmdfLibraryVersion	= 1.7
+
+; [5]
+[USB_Install.HW]
+AddReg		= Fitler_AddReg
+
+[Filter_AddReg]
+HKR,,"UpperFilter",0x00010000,sixcd
+
+; [6]
+[USB_Install.CoInstallers]
+AddReg		= CoInstallers_AddReg
+CopyFiles	= CoInstallers_CopyFiles
+
+[CoInstallers_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller01007.dll,WdfCoInstaller"
+
+[CoInstallers_CopyFiles]
+WdfCoInstaller01007.dll,,,0x00000010    ;COPYFLG_NO_OVERWRITE (for win2k)
+
+[DestinationDirs]
+CoInstallers_CopyFiles	= 11
+hidkmdf_CopyFiles	= 12
+Filter_CopyFiles	= 12
+
+; ======================== Source Media Section ========================
+
+; [7]
+[SourceDiskNames]
+1	= %DISK_NAME%,,,\i386
+2	= %DISK_NAME%,,,\amd64
+
+[SourceDiskFiles.x86]
+hidkmdf.sys	= 1
+sixcd.sys	= 1
+WdfCoInstaller01007.dll=1 ; make sure the number matches with SourceDisksNames
+
+[SourceDiskFiles.NTamd64]
+hidkmdf.sys	= 2
+sixcd.sys	= 2
+WdfCoInstaller01007.dll=2 ; make sure the number matches with SourceDisksNames
+
+; =============================== Strings ================================
+
+[Strings]
+ProviderName		= "Mythgarr"
+USB\MyDevice.DeviceDesc	= "Sony PlayStation 3 Controller"
+hidkmdf_SvcDesc		= "HID KMDF Driver"
+Filter_SvcDesc		= "SIXCD PS3 Controller Filter"
+DISK_NAME		= "sixcd Install Disk"
