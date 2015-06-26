@@ -1,0 +1,2 @@
+The PS3(tm)'s Sixaxis(tm) and Dual Shock 3(tm) controllers correctly report themselves as USB HID devices, but due to several quirks with the device themselves and Window's HID parser only the digital buttons are usable. The goal of this driver is to provide full support for the PS3's analog buttons, including configurable digital trigger levels, joystick dead zones, and automatic configuration.
+Special thanks to Helder Acevedo (aka: redcl0ud) for releasing XBCD under the GPL - his code was VERY heavily borrowed for this project.
